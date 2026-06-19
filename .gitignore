@@ -1,0 +1,7 @@
+.DS_Store
+.env
+/vendor/
+/node_modules/
+*.log
+/data/*.sqlite
+!/data/.gitkeep

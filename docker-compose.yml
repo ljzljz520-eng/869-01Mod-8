@@ -1,0 +1,25 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./backend/public:/var/www/html/public
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - php
+    networks:
+      - speed-probe-net
+
+  php:
+    build:
+      context: ./backend
+    volumes:
+      - ./backend/public:/var/www/html/public
+      - ./data:/var/www/html/data
+    networks:
+      - speed-probe-net
+
+networks:
+  speed-probe-net:
+    driver: bridge
