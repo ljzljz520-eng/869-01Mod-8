@@ -1,7 +1,6 @@
-// backend/public/js/collector.js - 访客信息采集器（完整版）
+// backend/public/js/collector.js - 访客信息采集器（支持采样决策分级上报）
 
 (function () {
-    // 解析 User-Agent 获取浏览器信息
     const parseUserAgent = () => {
         const ua = navigator.userAgent;
         let browser = '未知';
@@ -10,7 +9,6 @@
         let osVersion = '';
         let deviceType = '桌面设备';
 
-        // 检测浏览器
         if (ua.includes('Edg/')) {
             browser = 'Edge';
             browserVersion = ua.match(/Edg\/([\d.]+)/)?.[1] || '';
@@ -28,7 +26,6 @@
             browserVersion = ua.match(/(?:Opera|OPR)\/([\d.]+)/)?.[1] || '';
         }
 
-        // 检测操作系统 (注意：Chrome 90+ 会冻结 macOS 版本为 10.15.7)
         if (ua.includes('Windows NT 10')) {
             os = 'Windows';
             osVersion = '10/11';
@@ -40,7 +37,6 @@
             osVersion = '7';
         } else if (ua.includes('Mac OS X')) {
             os = 'macOS';
-            // 从 UA 提取版本（可能是冻结值）
             osVersion = ua.match(/Mac OS X ([\d_]+)/)?.[1]?.replace(/_/g, '.') || '';
         } else if (ua.includes('iPhone')) {
             os = 'iOS';
@@ -62,13 +58,10 @@
         return { browser, browserVersion, os, osVersion, deviceType };
     };
 
-    // 获取网络连接信息
     const getConnectionInfo = () => {
         const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
         if (conn) {
-            // 物理连接类型（部分浏览器支持）
             let physicalType = conn.type || '';
-            // 映射为中文
             const typeMap = {
                 'wifi': 'WiFi',
                 'cellular': '蜂窝网络',
@@ -81,7 +74,6 @@
             };
             physicalType = typeMap[physicalType] || physicalType;
 
-            // 等效连接速度
             const effectiveType = conn.effectiveType || '';
             const speedMap = {
                 '4g': '4G (快速)',
@@ -91,7 +83,6 @@
             };
             const speed = speedMap[effectiveType] || effectiveType;
 
-            // 组合显示
             let result = [];
             if (physicalType) result.push(physicalType);
             if (speed) result.push(speed);
@@ -106,7 +97,6 @@
         return { type: '浏览器不支持', downlink: '', rtt: '' };
     };
 
-    // 获取 WebGL 渲染器信息（显卡）
     const getWebGLInfo = () => {
         try {
             const canvas = document.createElement('canvas');
@@ -124,7 +114,6 @@
         return { vendor: '', renderer: '' };
     };
 
-    // 尝试使用 User-Agent Client Hints API 获取更准确信息
     const getClientHints = async () => {
         const hints = {
             platform: '',
@@ -136,7 +125,6 @@
 
         if (navigator.userAgentData) {
             try {
-                // 高熵值需要权限
                 const highEntropy = await navigator.userAgentData.getHighEntropyValues([
                     'platform',
                     'platformVersion',
@@ -151,7 +139,6 @@
                 hints.model = highEntropy.model || '';
                 hints.architecture = highEntropy.architecture || '';
             } catch (e) {
-                // 降级使用低熵值
                 hints.platform = navigator.userAgentData.platform || '';
                 hints.mobile = navigator.userAgentData.mobile || false;
             }
@@ -159,29 +146,68 @@
         return hints;
     };
 
-    // 主采集函数
-    const collectData = async () => {
-        const uaInfo = parseUserAgent();
-        const webglInfo = getWebGLInfo();
-        const connInfo = getConnectionInfo();
-        const clientHints = await getClientHints();
+    const isAuthenticated = () => {
+        try {
+            const hasAuth = document.cookie && document.cookie.match(/(auth|token|session|login|user_id)/i);
+            if (hasAuth) return true;
+            if (localStorage) {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i) || '';
+                    if (/^(auth|token|jwt|user_)/i.test(k)) return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    };
 
-        // 如果 Client Hints 提供了更准确的平台版本，使用它
-        let finalOsVersion = uaInfo.osVersion;
-        if (clientHints.platformVersion) {
-            finalOsVersion = clientHints.platformVersion;
+    const estimateErrorRate = () => {
+        try {
+            const errs = (window.__probeErrors = window.__probeErrors || []);
+            if (errs.length === 0) return 0;
+            const recent = errs.filter(e => Date.now() - (e.t || 0) < 60000);
+            return Math.min(100, recent.length * 2);
+        } catch (e) {
+            return 0;
         }
+    };
 
-        // 基础数据
-        const data = {
-            // 浏览器/系统信息
+    if (!window.__probeErrorBound) {
+        window.addEventListener('error', (e) => {
+            window.__probeErrors = window.__probeErrors || [];
+            window.__probeErrors.push({ m: e.message, t: Date.now() });
+            if (window.__probeErrors.length > 50) window.__probeErrors.shift();
+        });
+        window.__probeErrorBound = true;
+    }
+
+    const buildLightData = (uaInfo, hints) => ({
+        page_url: location.href,
+        authenticated: isAuthenticated(),
+        current_error_rate: estimateErrorRate(),
+        os: hints.platform || uaInfo.os,
+        browser: uaInfo.browser,
+        device_type: hints.mobile ? '手机' : uaInfo.deviceType,
+        referrer: document.referrer || location.href + ' [直接访问]',
+        country: '',
+        city: ''
+    });
+
+    const buildFullData = (uaInfo, webglInfo, connInfo, hints, geoData) => {
+        let finalOsVersion = uaInfo.osVersion;
+        if (hints.platformVersion) {
+            finalOsVersion = hints.platformVersion;
+        }
+        return {
+            page_url: location.href,
+            authenticated: isAuthenticated(),
+            current_error_rate: estimateErrorRate(),
+
             browser: uaInfo.browser,
             browser_version: uaInfo.browserVersion,
-            os: clientHints.platform || uaInfo.os,
+            os: hints.platform || uaInfo.os,
             os_version: finalOsVersion,
-            device_type: clientHints.mobile ? '手机' : uaInfo.deviceType,
+            device_type: hints.mobile ? '手机' : uaInfo.deviceType,
 
-            // 屏幕信息
             screen_width: screen.width,
             screen_height: screen.height,
             window_width: window.innerWidth,
@@ -189,92 +215,128 @@
             color_depth: screen.colorDepth,
             pixel_ratio: window.devicePixelRatio || 1,
 
-            // 浏览器设置
             language: navigator.language || navigator.userLanguage || '未知',
             platform: navigator.platform || '未知',
             cookie_enabled: navigator.cookieEnabled ? 1 : 0,
             do_not_track: navigator.doNotTrack === '1' ? 1 : 0,
 
-            // 硬件信息
             device_memory: navigator.deviceMemory || 0,
             cpu_cores: navigator.hardwareConcurrency || 0,
             touch_points: navigator.maxTouchPoints || 0,
             gpu_vendor: webglInfo.vendor,
             gpu_renderer: webglInfo.renderer,
-            architecture: clientHints.architecture || '',
+            architecture: hints.architecture || '',
 
-            // 网络信息
             connection_type: connInfo.type,
             connection_downlink: connInfo.downlink,
             connection_rtt: connInfo.rtt,
 
-            // 时区
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             timezone_offset: new Date().getTimezoneOffset(),
 
-            // 来源页面（完整地址 + 类型提示）
             referrer: (() => {
                 const ref = document.referrer;
-                if (!ref) {
-                    return location.href + ' [直接访问]';
-                }
+                if (!ref) return location.href + ' [直接访问]';
                 try {
                     const refUrl = new URL(ref);
-                    if (refUrl.hostname === location.hostname) {
-                        return ref + ' [站内]';
-                    }
+                    if (refUrl.hostname === location.hostname) return ref + ' [站内]';
                     return ref + ' [外部]';
                 } catch (e) {
                     return ref;
                 }
             })(),
 
-            // IP 定位信息（默认值）
-            country: '',
-            city: '',
-            isp: ''
+            country: geoData.country || '',
+            city: geoData.city || '',
+            isp: geoData.isp || ''
         };
+    };
 
-        // 尝试获取 IP 定位信息
+    const fetchGeo = async () => {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 3000);
-
             const ipRes = await fetch('https://ip-api.com/json/?lang=zh-CN', {
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-
             if (ipRes.ok) {
                 const ipData = await ipRes.json();
                 if (ipData.status === 'success') {
-                    data.country = ipData.country || '';
-                    data.city = ipData.city || '';
-                    data.isp = ipData.isp || '';
+                    return { country: ipData.country || '', city: ipData.city || '', isp: ipData.isp || '' };
                 }
             }
-        } catch (e) {
-            console.log('IP 定位获取失败');
-        }
+        } catch (e) { }
+        return { country: '', city: '', isp: '' };
+    };
 
-        // 提交数据
+    const requestSampleDecision = async () => {
+        try {
+            const pageUrl = encodeURIComponent(location.href);
+            const auth = isAuthenticated() ? '1' : '0';
+            const err = estimateErrorRate();
+            const res = await fetch(
+                `/api.php?action=sample_decision&page_url=${pageUrl}&auth=${auth}&error_rate=${err}`
+            );
+            if (res.ok) {
+                const json = await res.json();
+                if (json.status === 'success') return json.decision;
+            }
+        } catch (e) { }
+        return { sample_level: 'full' };
+    };
+
+    const submitData = async (payload) => {
         try {
             const res = await fetch('/api.php?action=collect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
+                body: JSON.stringify(payload)
             });
             const json = await res.json();
-            console.log('采集完成', json);
-            if (json.id) {
+            console.log('[Probe] 采集结果', json);
+            if (json && json.id) {
                 sessionStorage.setItem('visitor_id', json.id);
             }
+            return json;
         } catch (err) {
-            console.error('采集失败', err);
+            console.error('[Probe] 采集失败', err);
+            return null;
         }
     };
 
-    // 页面加载完成后执行
+    const collectData = async () => {
+        if (sessionStorage.getItem('probe_collected') === '1') {
+            return;
+        }
+
+        const uaInfo = parseUserAgent();
+        const hints = await getClientHints();
+
+        const decision = await requestSampleDecision();
+        const level = decision.sample_level || 'full';
+        console.log('[Probe] 采样决策:', level, decision);
+
+        if (level === 'skip') {
+            sessionStorage.setItem('probe_collected', '1');
+            console.log('[Probe] 本次采样跳过，不发送数据');
+            return;
+        }
+
+        let payload;
+        if (level === 'light') {
+            payload = buildLightData(uaInfo, hints);
+        } else {
+            const webglInfo = getWebGLInfo();
+            const connInfo = getConnectionInfo();
+            const geoData = await fetchGeo();
+            payload = buildFullData(uaInfo, webglInfo, connInfo, hints, geoData);
+        }
+
+        await submitData(payload);
+        sessionStorage.setItem('probe_collected', '1');
+    };
+
     if (document.readyState === 'complete') {
         collectData();
     } else {

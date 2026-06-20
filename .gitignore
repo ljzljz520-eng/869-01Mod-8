@@ -4,4 +4,7 @@
 /node_modules/
 *.log
 /data/*.sqlite
+/data/*.sqlite-shm
+/data/*.sqlite-wal
+/data/*.sqlite-journal
 !/data/.gitkeep
