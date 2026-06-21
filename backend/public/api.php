@@ -55,6 +55,7 @@ function computeSampleDecision($pdo, $pageUrl, $isAuthenticated = false, $curren
             'error_rate_threshold' => 5,
             'auth_ratio' => 0,
             'base_sample_rate' => 50,
+            'light_sample_rate' => 50,
             'min_sample_rate' => 10,
             'priority' => 0,
             'description' => '未匹配任何规则时的兜底策略'
@@ -64,8 +65,11 @@ function computeSampleDecision($pdo, $pageUrl, $isAuthenticated = false, $curren
     $pageValue = (float)$matchedRule['page_value'];
     $errorThreshold = (float)$matchedRule['error_rate_threshold'];
     $authRatioCfg = (float)$matchedRule['auth_ratio'];
-    $baseRate = (float)$matchedRule['base_sample_rate'];
+    $baseFullRate = (float)$matchedRule['base_sample_rate'];
+    $baseLightRate = (float)($matchedRule['light_sample_rate'] ?? max($baseFullRate * 1.5, 40));
     $minRate = (float)$matchedRule['min_sample_rate'];
+
+    $baseLightRate = max($baseLightRate, $baseFullRate);
 
     $hourStart = date('Y-m-d H:00:00');
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE created_at >= :start");
@@ -85,36 +89,54 @@ function computeSampleDecision($pdo, $pageUrl, $isAuthenticated = false, $curren
     $trafficSpike = $totalHour > ($basePerHour * ($spikeThreshold / 100));
 
     $valueWeight = $pageValue / 100;
+    $authValueBoost = 1 + ($authRatioCfg / 100) * 0.6;
     $errorBoost = $currentErrorRate >= $errorThreshold ? 1.5 : 1.0;
-    $authBoost = $isAuthenticated ? (1 + $authRatioCfg / 200) : 1.0;
+    $authRequestBoost = $isAuthenticated ? 1.2 : 1.0;
 
-    $dynamicRate = $baseRate * $valueWeight * $errorBoost * $authBoost;
+    $fullRate = $baseFullRate * $valueWeight * $authValueBoost * $errorBoost * $authRequestBoost;
+    $lightRate = $baseLightRate * (0.4 + 0.6 * $valueWeight) * $authValueBoost * $errorBoost;
 
     $budgetPressure = min(1.0, $fullSamplesHour / max(1, $budgetPerHour * 0.7));
     if ($budgetPressure > 0.8) {
-        $dynamicRate *= (1 - $budgetPressure * 0.6);
+        $decay = 1 - $budgetPressure * 0.6;
+        $fullRate *= $decay;
+        $lightRate *= $decay;
     }
 
     if ($trafficSpike) {
-        $dynamicRate = min($dynamicRate, max($emergencyRate, $minRate * 1.5));
+        $spikeCap = max($emergencyRate, $minRate * 1.5);
+        $fullRate = min($fullRate, $spikeCap);
+        $lightRate = min($lightRate, $spikeCap * 2);
     }
 
-    $dynamicRate = max($minRate, min(100, $dynamicRate));
+    $fullRate = max($minRate, min(100, $fullRate));
+    $lightRate = max($minRate * 2, min(100, $lightRate));
+    $lightRate = max($lightRate, $fullRate);
 
     $sampleLevel = 'skip';
-    $roll = mt_rand(1, 10000) / 100;
-    if ($roll <= $dynamicRate) {
-        $sampleLevel = $dynamicRate >= 70 || $pageValue >= 70 ? 'full' : 'light';
+    $rollLight = mt_rand(1, 10000) / 100;
+    if ($rollLight <= $lightRate) {
+        $rollFull = mt_rand(1, 10000) / 100;
+        $fullProb = ($fullRate / max(0.1, $lightRate)) * 100;
+        if ($rollFull <= $fullProb) {
+            $sampleLevel = 'full';
+        } else {
+            $sampleLevel = 'light';
+        }
     }
 
     return [
         'sample_level' => $sampleLevel,
-        'applied_rate' => round($dynamicRate, 2),
+        'applied_rate' => round($lightRate, 2),
+        'full_rate' => round($fullRate, 2),
+        'light_rate' => round($lightRate, 2),
         'matched_rule_id' => $matchedRule['id'],
         'matched_rule_name' => $matchedRule['rule_name'],
         'page_value' => $pageValue,
+        'auth_ratio_config' => $authRatioCfg,
         'error_boost_active' => $errorBoost > 1,
-        'auth_boost_active' => $authBoost > 1,
+        'auth_value_boost_active' => $authValueBoost > 1,
+        'auth_request_boost_active' => $authRequestBoost > 1,
         'traffic_spike' => $trafficSpike,
         'budget_pressure' => round($budgetPressure * 100, 2),
         'budget_used_hour' => $fullSamplesHour,
@@ -122,47 +144,81 @@ function computeSampleDecision($pdo, $pageUrl, $isAuthenticated = false, $curren
     ];
 }
 
-function getLostCapabilities($currentRates, $targetRates) {
+function getLostCapabilities($currentFullRates, $targetFullRates, $currentLightRates = null, $targetLightRates = null) {
     $lost = [];
 
-    foreach ($currentRates as $ruleName => $cur) {
-        $tgt = $targetRates[$ruleName] ?? $cur;
-        if ($tgt >= $cur) continue;
-        $drop = $cur - $tgt;
-        $capabilities = [];
+    foreach ($currentFullRates as $ruleName => $curFull) {
+        $tgtFull = $targetFullRates[$ruleName] ?? $curFull;
+        $curLight = $currentLightRates[$ruleName] ?? $curFull;
+        $tgtLight = $targetLightRates[$ruleName] ?? $tgtFull;
 
-        if ($tgt < 100 && $cur >= 100) {
-            $capabilities[] = '全量追踪';
+        $capabilities = [];
+        $severity = 'low';
+
+        if ($tgtFull < 100 && $curFull >= 100) {
+            $capabilities[] = '全量追踪覆盖率';
+            $severity = 'medium';
         }
-        if ($tgt < 90) {
+        if ($tgtFull < 90) {
             $capabilities[] = '长尾性能分位数 (P95/P99)';
+            if ($severity === 'low') $severity = 'medium';
         }
-        if ($tgt < 70) {
+        if ($tgtFull < 70) {
             $capabilities[] = '细粒度设备指纹对比';
+            if ($severity === 'low') $severity = 'medium';
         }
-        if ($tgt < 50) {
+        if ($tgtFull < 50) {
             $capabilities[] = '单用户行为路径还原';
             $capabilities[] = '地域细分热力图';
+            $severity = 'medium';
         }
-        if ($tgt < 30) {
+        if ($tgtFull < 30) {
             $capabilities[] = '低流量页面异常检测';
             $capabilities[] = '浏览器版本细分统计';
+            $severity = 'high';
         }
-        if ($tgt < 15) {
+        if ($tgtFull < 15) {
             $capabilities[] = '时段波动趋势分析';
             $capabilities[] = '来源渠道归因 (小流量渠道)';
+            $severity = 'high';
         }
-        if ($tgt < 5) {
+        if ($tgtFull < 5) {
             $capabilities[] = '个体级别调试能力';
             $capabilities[] = '罕见设备/浏览器覆盖';
+            $severity = 'high';
         }
 
-        if (!empty($capabilities)) {
+        if ($tgtLight < 90 && $curLight >= 90) {
+            $capabilities[] = '轻量指标广泛覆盖';
+            if ($severity === 'low') $severity = 'medium';
+        }
+        if ($tgtLight < 50) {
+            $capabilities[] = '整体 PV/UV 趋势可靠性';
+            $severity = 'high';
+        }
+        if ($tgtLight < 20) {
+            $capabilities[] = '基本流量来源分布';
+            $capabilities[] = '设备大类分布 (桌面/移动)';
+            $severity = 'high';
+        }
+        if ($tgtLight < 5) {
+            $capabilities[] = '宏观流量量级估算';
+            $severity = 'high';
+        }
+
+        $dropFull = $curFull - $tgtFull;
+        $dropLight = $curLight - $tgtLight;
+
+        if (!empty($capabilities) && ($dropFull > 0.1 || $dropLight > 0.1)) {
             $lost[] = [
                 'rule' => $ruleName,
-                'current_rate' => $cur,
-                'target_rate' => $tgt,
-                'drop_percent' => round($drop, 2),
+                'current_full_rate' => round($curFull, 2),
+                'target_full_rate' => round($tgtFull, 2),
+                'current_light_rate' => round($curLight, 2),
+                'target_light_rate' => round($tgtLight, 2),
+                'drop_full_percent' => round($dropFull, 2),
+                'drop_light_percent' => round($dropLight, 2),
+                'severity' => $severity,
                 'lost_capabilities' => $capabilities
             ];
         }
@@ -336,23 +392,54 @@ try {
             $search = $_GET['search'] ?? '';
             $filterLevel = $_GET['sample_level'] ?? '';
 
-            $where = "WHERE 1=1";
+            $whereFull = "WHERE 1=1";
+            $whereLight = "WHERE 1=1";
             $params = [];
 
             if ($search) {
-                $where .= " AND (ip LIKE :search OR remark LIKE :search OR city LIKE :search)";
+                $whereFull .= " AND (ip LIKE :search OR remark LIKE :search OR city LIKE :search)";
+                $whereLight .= " AND (ip LIKE :search OR city LIKE :search OR page_url LIKE :search)";
                 $params[':search'] = "%$search%";
             }
             if ($filterLevel) {
-                $where .= " AND sample_level = :level";
-                $params[':level'] = $filterLevel;
+                if ($filterLevel === 'full') {
+                    $whereFull .= " AND sample_level = 'full'";
+                    $whereLight .= " AND 1=0";
+                } elseif ($filterLevel === 'light') {
+                    $whereFull .= " AND 1=0";
+                    $whereLight .= " AND sample_level = 'light'";
+                }
             }
 
-            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors $where");
+            $countSql = "SELECT SUM(cnt) as total FROM (
+                SELECT COUNT(*) as cnt FROM visitors $whereFull
+                UNION ALL
+                SELECT COUNT(*) as cnt FROM lightweight_metrics $whereLight
+            )";
+            $countStmt = $pdo->prepare($countSql);
             $countStmt->execute($params);
-            $total = $countStmt->fetchColumn();
+            $total = (int)$countStmt->fetchColumn();
 
-            $stmt = $pdo->prepare("SELECT * FROM visitors $where ORDER BY created_at DESC LIMIT $limit OFFSET $offset");
+            $listSql = "SELECT * FROM (
+                SELECT id, 'full' as source_table, ip, user_agent, country, city, isp,
+                    browser, browser_version, os, os_version, device_type,
+                    screen_width, screen_height, window_width, window_height,
+                    language, timezone, platform, cookie_enabled,
+                    touch_points, device_memory, cpu_cores, connection_type,
+                    referrer, remark, sample_level, page_value, error_rate, auth_ratio,
+                    created_at, '' as page_url
+                FROM visitors $whereFull
+                UNION ALL
+                SELECT id, 'light' as source_table, ip, user_agent, country, city, '' as isp,
+                    browser, '' as browser_version, os, '' as os_version, device_type,
+                    0 as screen_width, 0 as screen_height, 0 as window_width, 0 as window_height,
+                    '' as language, '' as timezone, '' as platform, 0 as cookie_enabled,
+                    0 as touch_points, 0 as device_memory, 0 as cpu_cores, '' as connection_type,
+                    referrer, '' as remark, sample_level, 0 as page_value, 0 as error_rate, 0 as auth_ratio,
+                    created_at, page_url
+                FROM lightweight_metrics $whereLight
+            ) ORDER BY created_at DESC LIMIT $limit OFFSET $offset";
+            $stmt = $pdo->prepare($listSql);
             $stmt->execute($params);
             $list = $stmt->fetchAll();
 
@@ -384,17 +471,25 @@ try {
 
         case 'stats':
             $today = date('Y-m-d');
-            $todayStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today");
-            $todayStmt->execute([':today' => $today]);
-            $todayCount = $todayStmt->fetchColumn();
+            $fullTodayStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today");
+            $fullTodayStmt->execute([':today' => $today]);
+            $fullToday = (int)$fullTodayStmt->fetchColumn();
 
-            $totalStmt = $pdo->query("SELECT COUNT(*) FROM visitors");
-            $totalCount = $totalStmt->fetchColumn();
+            $lightTodayStmt = $pdo->prepare("SELECT COUNT(*) FROM lightweight_metrics WHERE DATE(created_at) = :today");
+            $lightTodayStmt->execute([':today' => $today]);
+            $lightToday = (int)$lightTodayStmt->fetchColumn();
+
+            $fullTotal = (int)$pdo->query("SELECT COUNT(*) FROM visitors")->fetchColumn();
+            $lightTotal = (int)$pdo->query("SELECT COUNT(*) FROM lightweight_metrics")->fetchColumn();
 
             echo json_encode([
                 'status' => 'success',
-                'total' => $totalCount,
-                'today' => $todayCount
+                'total' => $fullTotal + $lightTotal,
+                'today' => $fullToday + $lightToday,
+                'full_total' => $fullTotal,
+                'light_total' => $lightTotal,
+                'full_today' => $fullToday,
+                'light_today' => $lightToday
             ]);
             break;
 
@@ -410,7 +505,8 @@ try {
                 $input = json_decode(file_get_contents('php://input'), true);
                 $id = $input['id'] ?? 0;
                 $fields = ['rule_name', 'url_pattern', 'page_value', 'error_rate_threshold',
-                    'auth_ratio', 'base_sample_rate', 'min_sample_rate', 'priority', 'enabled', 'description'];
+                    'auth_ratio', 'base_sample_rate', 'light_sample_rate', 'min_sample_rate',
+                    'priority', 'enabled', 'description'];
 
                 if ($id) {
                     $sets = [];
@@ -581,11 +677,13 @@ try {
             $budgetPerHourNew = (float)($input['budget_per_hour'] ?? getMetaValue($pdo, 'global_budget_per_hour', 50000));
             $rateOverrides = $input['rate_overrides'] ?? [];
 
-            $stmt = $pdo->query("SELECT rule_name, base_sample_rate, min_sample_rate, page_value, priority FROM sampling_config WHERE enabled = 1 ORDER BY priority DESC");
+            $stmt = $pdo->query("SELECT rule_name, base_sample_rate, light_sample_rate, min_sample_rate, page_value, priority FROM sampling_config WHERE enabled = 1 ORDER BY priority DESC");
             $rules = $stmt->fetchAll();
 
-            $currentRates = [];
-            $targetRates = [];
+            $currentFullRates = [];
+            $currentLightRates = [];
+            $targetFullRates = [];
+            $targetLightRates = [];
             $ruleDetails = [];
 
             $originalBudget = (float)getMetaValue($pdo, 'global_budget_per_hour', 50000);
@@ -604,40 +702,62 @@ try {
 
             foreach ($rules as $r) {
                 $name = $r['rule_name'];
-                $currentRate = (float)$r['base_sample_rate'];
-                $currentRates[$name] = $currentRate;
+                $curFull = (float)$r['base_sample_rate'];
+                $curLight = (float)($r['light_sample_rate'] ?? max($curFull * 1.5, 40));
+                $curLight = max($curLight, $curFull);
+                $currentFullRates[$name] = $curFull;
+                $currentLightRates[$name] = $curLight;
 
-                $targetRate = $currentRate;
+                $tgtFull = $curFull;
+                $tgtLight = $curLight;
+
                 if (isset($rateOverrides[$name])) {
-                    $targetRate = (float)$rateOverrides[$name];
+                    $tgtFull = (float)$rateOverrides[$name];
+                    $lightToFullRatio = $curLight / max(0.1, $curFull);
+                    $tgtLight = $tgtFull * $lightToFullRatio;
+                    $tgtLight = max($tgtLight, $tgtFull * 1.5);
+                    $tgtLight = min(100, $tgtLight);
                 } else {
                     $weight = ((float)$r['page_value'] * max(1, (int)$r['priority'] / 10)) / max(1, $weightSum);
                     $share = $trafficPerHour * $weight;
                     $allowedShare = $budgetPerHourNew * $weight;
-                    $scaled = $currentRate * min(1, $allowedShare / max(1, $share)) * $budgetRatio;
-                    $targetRate = max((float)$r['min_sample_rate'], min(100, $scaled));
+                    $scaled = $curFull * min(1, $allowedShare / max(1, $share)) * $budgetRatio;
+                    $tgtFull = max((float)$r['min_sample_rate'], min(100, $scaled));
+
+                    $lightToFullRatio = $curLight / max(0.1, $curFull);
+                    $tgtLight = $tgtFull * $lightToFullRatio;
+                    $tgtLight = max($tgtLight, $tgtFull * 1.5);
+                    $tgtLight = min(100, $tgtLight);
+                    $tgtLight = max($tgtLight, (float)$r['min_sample_rate']);
                 }
 
-                $targetRates[$name] = round($targetRate, 2);
+                $targetFullRates[$name] = round($tgtFull, 2);
+                $targetLightRates[$name] = round($tgtLight, 2);
+
                 $ruleDetails[] = [
                     'rule_name' => $name,
-                    'current_rate' => $currentRate,
-                    'target_rate' => $targetRates[$name],
+                    'current_full_rate' => $curFull,
+                    'target_full_rate' => round($tgtFull, 2),
+                    'current_light_rate' => round($curLight, 2),
+                    'target_light_rate' => round($tgtLight, 2),
                     'page_value' => (float)$r['page_value'],
                     'priority' => (int)$r['priority'],
                     'min_sample_rate' => (float)$r['min_sample_rate']
                 ];
             }
 
-            $lost = getLostCapabilities($currentRates, $targetRates);
+            $lost = getLostCapabilities($currentFullRates, $targetFullRates, $currentLightRates, $targetLightRates);
 
             $affectedRules = count($lost);
             $totalCapabilitiesLost = 0;
-            foreach ($lost as $l) $totalCapabilitiesLost += count($l['lost_capabilities']);
+            $maxSeverity = 'low';
+            foreach ($lost as $l) {
+                $totalCapabilitiesLost += count($l['lost_capabilities']);
+                if ($l['severity'] === 'high') $maxSeverity = 'high';
+                elseif ($l['severity'] === 'medium' && $maxSeverity === 'low') $maxSeverity = 'medium';
+            }
 
-            $overallImpact = 'low';
-            if ($totalCapabilitiesLost >= 8 || $affectedRules >= 4) $overallImpact = 'high';
-            elseif ($totalCapabilitiesLost >= 3 || $affectedRules >= 2) $overallImpact = 'medium';
+            $overallImpact = $maxSeverity;
 
             echo json_encode([
                 'status' => 'success',

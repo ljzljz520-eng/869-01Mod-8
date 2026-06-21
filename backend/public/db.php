@@ -94,6 +94,7 @@ class Database
             error_rate_threshold REAL DEFAULT 5,
             auth_ratio REAL DEFAULT 0,
             base_sample_rate REAL DEFAULT 100,
+            light_sample_rate REAL DEFAULT 50,
             min_sample_rate REAL DEFAULT 5,
             priority INTEGER DEFAULT 50,
             enabled INTEGER DEFAULT 1,
@@ -102,6 +103,12 @@ class Database
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )";
         self::$pdo->exec($configSql);
+
+        $columns = self::$pdo->query("PRAGMA table_info(sampling_config)")->fetchAll();
+        $colNames = array_column($columns, 'name');
+        if (!in_array('light_sample_rate', $colNames)) {
+            self::$pdo->exec("ALTER TABLE sampling_config ADD COLUMN light_sample_rate REAL DEFAULT 50");
+        }
 
         $metaSql = "CREATE TABLE IF NOT EXISTS sampling_metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,10 +154,10 @@ class Database
     {
         $stmt = self::$pdo->prepare("INSERT INTO sampling_config (
             rule_name, url_pattern, page_value, error_rate_threshold, auth_ratio,
-            base_sample_rate, min_sample_rate, priority, enabled, description
+            base_sample_rate, light_sample_rate, min_sample_rate, priority, enabled, description
         ) VALUES (
             :rule_name, :url_pattern, :page_value, :error_rate_threshold, :auth_ratio,
-            :base_sample_rate, :min_sample_rate, :priority, :enabled, :description
+            :base_sample_rate, :light_sample_rate, :min_sample_rate, :priority, :enabled, :description
         )");
 
         $configs = [
@@ -161,6 +168,7 @@ class Database
                 ':error_rate_threshold' => 2,
                 ':auth_ratio' => 80,
                 ':base_sample_rate' => 100,
+                ':light_sample_rate' => 100,
                 ':min_sample_rate' => 80,
                 ':priority' => 100,
                 ':enabled' => 1,
@@ -173,6 +181,7 @@ class Database
                 ':error_rate_threshold' => 3,
                 ':auth_ratio' => 95,
                 ':base_sample_rate' => 80,
+                ':light_sample_rate' => 90,
                 ':min_sample_rate' => 50,
                 ':priority' => 90,
                 ':enabled' => 1,
@@ -185,6 +194,7 @@ class Database
                 ':error_rate_threshold' => 4,
                 ':auth_ratio' => 30,
                 ':base_sample_rate' => 60,
+                ':light_sample_rate' => 75,
                 ':min_sample_rate' => 30,
                 ':priority' => 70,
                 ':enabled' => 1,
@@ -197,6 +207,7 @@ class Database
                 ':error_rate_threshold' => 6,
                 ':auth_ratio' => 10,
                 ':base_sample_rate' => 30,
+                ':light_sample_rate' => 60,
                 ':min_sample_rate' => 10,
                 ':priority' => 40,
                 ':enabled' => 1,
@@ -209,6 +220,7 @@ class Database
                 ':error_rate_threshold' => 10,
                 ':auth_ratio' => 0,
                 ':base_sample_rate' => 5,
+                ':light_sample_rate' => 40,
                 ':min_sample_rate' => 1,
                 ':priority' => 10,
                 ':enabled' => 1,
@@ -221,6 +233,7 @@ class Database
                 ':error_rate_threshold' => 5,
                 ':auth_ratio' => 5,
                 ':base_sample_rate' => 20,
+                ':light_sample_rate' => 50,
                 ':min_sample_rate' => 5,
                 ':priority' => 1,
                 ':enabled' => 1,

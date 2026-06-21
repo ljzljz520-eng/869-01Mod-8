@@ -515,7 +515,8 @@
                                     <th class="px-5 py-3 text-center font-semibold">页面价值</th>
                                     <th class="px-5 py-3 text-center font-semibold">错误率阈值</th>
                                     <th class="px-5 py-3 text-center font-semibold">授权比例</th>
-                                    <th class="px-5 py-3 text-center font-semibold">基础采样率</th>
+                                    <th class="px-5 py-3 text-center font-semibold">全量采样率</th>
+                                    <th class="px-5 py-3 text-center font-semibold">轻量采样率</th>
                                     <th class="px-5 py-3 text-center font-semibold">最低保障</th>
                                     <th class="px-5 py-3 text-center font-semibold">优先级</th>
                                     <th class="px-5 py-3 text-right font-semibold">操作</th>
@@ -570,6 +571,13 @@
                                             {{ rule.base_sample_rate }}%
                                         </span>
                                     </td>
+                                    <td class="px-5 py-4 text-center">
+                                        <span :class="['font-medium',
+                                            rule.light_sample_rate >= 80 ? 'text-emerald-600' :
+                                            rule.light_sample_rate >= 40 ? 'text-sky-600' : 'text-gray-500']">
+                                            {{ rule.light_sample_rate }}%
+                                        </span>
+                                    </td>
                                     <td class="px-5 py-4 text-center text-gray-600 font-mono">
                                         {{ rule.min_sample_rate }}%
                                     </td>
@@ -591,7 +599,7 @@
                                     </td>
                                 </tr>
                                 <tr v-if="samplingRules.length === 0">
-                                    <td colspan="10" class="px-5 py-12 text-center text-gray-400">
+                                    <td colspan="11" class="px-5 py-12 text-center text-gray-400">
                                         <i class="ri-file-list-3-line text-4xl block mb-2 opacity-40"></i>
                                         暂无规则，点击右上角新建
                                     </td>
@@ -667,8 +675,10 @@
                     <div v-if="estimateResult" class="space-y-4 mb-6">
                         <div v-for="r in estimateResult.rules" :key="r.rule_name"
                             class="border border-gray-200 rounded-lg p-4 transition"
-                            :class="r.target_rate < r.current_rate ? 'bg-rose-50/40 border-rose-200' :
-                                r.target_rate > r.current_rate ? 'bg-emerald-50/40 border-emerald-200' : ''">
+                            :class="[
+                                r.target_full_rate < r.current_full_rate ? 'bg-rose-50/40 border-rose-200' : '',
+                                r.target_full_rate > r.current_full_rate ? 'bg-emerald-50/40 border-emerald-200' : ''
+                            ]">
                             <div
                                 class="flex flex-col md:flex-row md:items-center md:justify-between mb-3 space-y-2 md:space-y-0">
                                 <div>
@@ -684,26 +694,31 @@
                                         </span>
                                     </div>
                                 </div>
-                                <div class="flex items-center space-x-4 text-sm">
-                                    <div>
-                                        <span class="text-gray-500 text-xs">当前</span>
-                                        <span class="ml-1 font-bold text-gray-700 font-mono">
-                                            {{ r.current_rate }}%
-                                        </span>
+                                <div class="flex items-center space-x-3 text-sm">
+                                    <div class="text-center">
+                                        <div class="text-gray-500 text-xs">全量</div>
+                                        <div class="flex items-center space-x-1">
+                                            <span class="text-emerald-700 font-mono font-bold">{{ r.current_full_rate }}%</span>
+                                            <i class="ri-arrow-right-s-line text-gray-400"></i>
+                                            <span :class="['font-mono font-bold',
+                                                r.target_full_rate < r.current_full_rate ? 'text-rose-600' :
+                                                r.target_full_rate > r.current_full_rate ? 'text-emerald-600' : 'text-gray-700']">
+                                                {{ r.target_full_rate }}%
+                                            </span>
+                                        </div>
                                     </div>
-                                    <i class="ri-arrow-right-line text-gray-400"></i>
-                                    <div>
-                                        <span class="text-gray-500 text-xs">调整后</span>
-                                        <span :class="['ml-1 font-bold font-mono',
-                                            r.target_rate < r.current_rate ? 'text-rose-600' :
-                                            r.target_rate > r.current_rate ? 'text-emerald-600' : 'text-gray-700']">
-                                            {{ r.target_rate }}%
-                                        </span>
-                                    </div>
-                                    <div v-if="r.target_rate !== r.current_rate" class="text-xs font-mono"
-                                        :class="r.target_rate < r.current_rate ? 'text-rose-500' : 'text-emerald-500'">
-                                        Δ {{ r.target_rate > r.current_rate ? '+' : '' }}
-                                        {{ (r.target_rate - r.current_rate).toFixed(1) }}%
+                                    <div class="w-px h-6 bg-gray-200"></div>
+                                    <div class="text-center">
+                                        <div class="text-gray-500 text-xs">轻量</div>
+                                        <div class="flex items-center space-x-1">
+                                            <span class="text-sky-700 font-mono">{{ r.current_light_rate }}%</span>
+                                            <i class="ri-arrow-right-s-line text-gray-400"></i>
+                                            <span :class="['font-mono',
+                                                r.target_light_rate < r.current_light_rate ? 'text-rose-500' :
+                                                r.target_light_rate > r.current_light_rate ? 'text-sky-600' : 'text-gray-600']">
+                                                {{ r.target_light_rate }}%
+                                            </span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -711,7 +726,7 @@
                                 :min="r.min_sample_rate" :max="100" step="1" @input="estimateDirty = true"
                                 class="w-full accent-purple-600">
                             <div class="flex justify-between text-xs text-gray-400 mt-1">
-                                <span>最低 {{ r.min_sample_rate }}%</span><span>100%</span>
+                                <span>最低 {{ r.min_sample_rate }}%</span><span>调整全量采样率</span><span>100%</span>
                             </div>
                         </div>
                     </div>
@@ -725,25 +740,49 @@
                         </div>
                         <div class="space-y-3">
                             <div v-for="item in estimateResult.lost_capabilities" :key="item.rule"
-                                class="bg-white rounded-lg p-4 border border-rose-100">
+                                class="bg-white rounded-lg p-4 border"
+                                :class="item.severity === 'high' ? 'border-rose-200' :
+                                    item.severity === 'medium' ? 'border-amber-200' : 'border-sky-200'">
                                 <div class="flex items-center justify-between mb-3">
-                                    <div class="font-medium text-gray-900 flex items-center">
-                                        <i class="ri-shield-cross-line text-rose-500 mr-2"></i>
+                                    <div class="font-medium text-gray-900 flex items-center space-x-2">
+                                        <i :class="['mr-1',
+                                            item.severity === 'high' ? 'ri-alarm-warning-line text-rose-500' :
+                                            item.severity === 'medium' ? 'ri-alert-line text-amber-500' :
+                                            'ri-information-line text-sky-500']"></i>
                                         {{ item.rule }}
-                                    </div>
-                                    <div class="text-sm">
-                                        <span class="text-gray-500">{{ item.current_rate }}%</span>
-                                        <i class="ri-arrow-right-line text-gray-300 mx-1"></i>
-                                        <span class="font-bold text-rose-600">{{ item.target_rate }}%</span>
-                                        <span
-                                            class="ml-2 text-xs text-rose-500 bg-rose-100 px-2 py-0.5 rounded">
-                                            -{{ item.drop_percent }}%
+                                        <span :class="['text-xs px-2 py-0.5 rounded-full font-medium',
+                                            item.severity === 'high' ? 'bg-rose-100 text-rose-700' :
+                                            item.severity === 'medium' ? 'bg-amber-100 text-amber-700' :
+                                            'bg-sky-100 text-sky-700']">
+                                            {{ item.severity === 'high' ? '严重' :
+                                               item.severity === 'medium' ? '中等' : '轻微' }}
                                         </span>
+                                    </div>
+                                    <div class="text-sm flex items-center space-x-3">
+                                        <div class="text-center">
+                                            <div class="text-gray-400 text-xs">全量</div>
+                                            <div class="flex items-center">
+                                                <span class="text-gray-500 font-mono">{{ item.current_full_rate }}%</span>
+                                                <i class="ri-arrow-right-s-line text-gray-300 mx-0.5"></i>
+                                                <span class="font-bold text-rose-600 font-mono">{{ item.target_full_rate }}%</span>
+                                            </div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div class="text-gray-400 text-xs">轻量</div>
+                                            <div class="flex items-center">
+                                                <span class="text-gray-500 font-mono text-xs">{{ item.current_light_rate }}%</span>
+                                                <i class="ri-arrow-right-s-line text-gray-300 mx-0.5"></i>
+                                                <span class="font-mono text-rose-500 text-xs">{{ item.target_light_rate }}%</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                                 <div class="flex flex-wrap gap-2">
                                     <span v-for="cap in item.lost_capabilities" :key="cap"
-                                        class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">
+                                        :class="['inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium border',
+                                            item.severity === 'high' ? 'bg-rose-100 text-rose-800 border-rose-200' :
+                                            item.severity === 'medium' ? 'bg-amber-100 text-amber-800 border-amber-200' :
+                                            'bg-sky-100 text-sky-700 border-sky-200']">
                                         <i class="ri-close-circle-line mr-1"></i>{{ cap }}
                                     </span>
                                 </div>
@@ -863,18 +902,25 @@
                             <label class="block text-sm font-medium text-gray-700 mb-1">授权比例 (%)</label>
                             <input type="number" v-model.number="ruleForm.auth_ratio" min="0" max="100"
                                 class="w-full border rounded-lg p-2.5 focus:ring-2 focus:ring-brand-500 focus:border-brand-500">
-                            <p class="text-xs text-gray-500 mt-1">登录用户比例，授权用户加成采样</p>
+                            <p class="text-xs text-gray-500 mt-1">该类页面授权用户占比，越高页面价值加成越大</p>
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">基础采样率 (%)</label>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">全量采样率 (%)</label>
                             <input type="number" v-model.number="ruleForm.base_sample_rate" min="0" max="100"
                                 class="w-full border rounded-lg p-2.5 font-bold text-brand-700 focus:ring-2 focus:ring-brand-500 focus:border-brand-500">
+                            <p class="text-xs text-gray-500 mt-1">完整 30+ 字段入库的比例</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">轻量采样率 (%)</label>
+                            <input type="number" v-model.number="ruleForm.light_sample_rate" min="0" max="100"
+                                class="w-full border rounded-lg p-2.5 text-sky-700 focus:ring-2 focus:ring-sky-500 focus:border-sky-500">
+                            <p class="text-xs text-gray-500 mt-1">仅 10 个核心字段入库，低优先级页面可设高</p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">最低保障采样率 (%)</label>
                             <input type="number" v-model.number="ruleForm.min_sample_rate" min="0" max="100"
                                 class="w-full border rounded-lg p-2.5 focus:ring-2 focus:ring-brand-500 focus:border-brand-500">
-                            <p class="text-xs text-gray-500 mt-1">即使流量突增也不低于此值</p>
+                            <p class="text-xs text-gray-500 mt-1">即使流量突增全量也不低于此值</p>
                         </div>
                         <div class="md:col-span-2">
                             <label class="block text-sm font-medium text-gray-700 mb-1">规则描述</label>
@@ -938,7 +984,8 @@
                 const ruleForm = reactive({
                     id: null, rule_name: '', url_pattern: '', page_value: 50,
                     error_rate_threshold: 5, auth_ratio: 0, base_sample_rate: 50,
-                    min_sample_rate: 5, priority: 50, enabled: 1, description: ''
+                    light_sample_rate: 50, min_sample_rate: 5, priority: 50,
+                    enabled: 1, description: ''
                 });
 
                 const estimateBudget = ref(50000);
@@ -1076,6 +1123,7 @@
                         ruleForm.error_rate_threshold = 5;
                         ruleForm.auth_ratio = 0;
                         ruleForm.base_sample_rate = 50;
+                        ruleForm.light_sample_rate = 50;
                         ruleForm.min_sample_rate = 5;
                         ruleForm.priority = 50;
                         ruleForm.enabled = 1;
